@@ -91,7 +91,31 @@ func fixtureSource(t *testing.T) *fixture {
 			}
 			out = map[string]any{"data": map[string]string{"root": root(2000 + slot)}}
 		case strings.HasSuffix(p, "/validators"):
-			out = map[string]any{"data": []any{map[string]any{"index": "7", "balance": "0", "status": "withdrawal_done", "validator": map[string]string{"effective_balance": "0"}}, map[string]any{"index": "8", "balance": "32000000000", "validator": map[string]string{"effective_balance": "32000000000"}}}}
+			ids := []string{"0", "1", "2", "3", "4", "5", "6", "7", "8"}
+			if r.Method == "POST" {
+				var request struct {
+					IDs []string `json:"ids"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					http.Error(w, "bad IDs", 400)
+					return
+				}
+				ids = request.IDs
+			}
+			vals := []any{}
+			for _, id := range ids {
+				n, err := number(id)
+				if err != nil || n > 8 {
+					continue
+				}
+				balance := "32000000000"
+				if n == 7 {
+					balance = "0"
+				}
+				vals = append(vals, map[string]any{"index": id, "balance": balance, "validator": map[string]string{"effective_balance": balance}})
+			}
+			out = map[string]any{"data": vals}
+
 		case strings.HasSuffix(p, "/committees"):
 			out = map[string]any{"data": []any{map[string]any{"index": "0", "slot": "12", "validators": []string{"7", "8"}}}}
 		case strings.Contains(p, "/validator/duties/proposer/"):

@@ -1,4 +1,4 @@
-# EthVis2 Collector v0.1
+# EthVis2 Collector v0.2
 
 首版使用 **Go 1.27.3** 采集，用 **Node.js 24.22.1** 做研究验证。PostgreSQL 只管理任务/进度/归档索引，ClickHouse 保存事实和查询视图。完整源响应独立存为 SHA-256 寻址的 gzip 文件。
 
@@ -85,7 +85,7 @@ go build -o bin/ethvis-collector ./cmd/ethvis-collector
 | SignedBeaconBlock | 完整 JSON，保留签名、未知字段和执行 payload 中的原始交易 |
 | operations | attestation、slashings、deposit、exit、BLS change、commitments、execution requests 等已知数组拆行；同步聚合/payload 保留对象 |
 | slot | 由固定 canonical 祖先链形成时间轴，链内缺口标为 skipped；不把任意 API 404 解释为缺块 |
-| 历史 Validator | 固定 state root 查询；保留余额 0、完整 registry 对象 |
+| 历史 Validator | 固定 state root，以 POST ids 分批查询；成功批次可恢复缓存，保留余额 0、完整 registry 对象，并检查连续覆盖与注册表末尾 |
 | committees / proposer duties / sync members | 历史上下文；sync 位置原数组不提前去重 |
 | finality checkpoints | 固定历史 state 查询 |
 | proposer reward | 按 block root；核对 proposer identity 和分项总和 |
@@ -173,3 +173,36 @@ WORKERS=1 STATE_WORKERS=1 HTTP_TIMEOUT_SECONDS=900 ./bin/ethvis-collector collec
 - 最后一条 collector stopped 是本轮失败汇总，可能只回显第一项错误。先看 task 状态和 coverage，不能据最后一行认为其余任务都失败。
 
 本次仅排障时，不要用 `init` 清理数据库或删除已有成功结果。恢复后以 `verify` 确认必需任务完成；它仍不代表已完成精确余额重放对账。
+
+
+## v0.2：本机仍超时时，分批 Validator 与服务端超时
+
+保留已经验证有用的 `HTTP_TIMEOUT_SECONDS=3600`。它只控制采集器，不会更改 Teku 的请求时限。
+
+已核查的 Teku 官方源码包含隐藏启动参数（单位为秒）：
+
+```text
+--Xrest-api-async-timeout-seconds=1800
+```
+
+该源码中的异步 REST 默认值为 30 秒。源码版本为 `715545a182748b959540bfceee12286e058ca49d`，**没有验证你安装的 26.10.0 二进制是否包含同一参数、也没有确认你当前服务的实际超时值**。请先在服务端核实版本支持，再把参数加到现有 Teku 启动命令/服务配置，按你的部署方式重启；不要把它误加到采集器 `.env`。1800 是供测试的服务端预算示例，客户端 3600 留出余量，不保证所有历史状态都能在该时限内恢复。
+
+- [Teku 参数源码](https://github.com/Consensys/teku/blob/715545a182748b959540bfceee12286e058ca49d/teku/src/main/java/tech/pegasys/teku/cli/options/BeaconRestApiOptions.java)
+- [Teku 默认超时源码](https://github.com/Consensys/teku/blob/715545a182748b959540bfceee12286e058ca49d/data/beaconrestapi/src/main/java/tech/pegasys/teku/beaconrestapi/BeaconRestApiConfig.java)
+
+Validator 不再用一次无限制 GET 返回全体注册表。现在按显式索引 POST，每批默认 500 个；可在采集器环境中设置 `VALIDATOR_BATCH_SIZE`（1..10000）。使用的是标准 [POST validators 接口](https://github.com/ethereum/beacon-APIs/blob/master/apis/beacon/states/validators.yaml)。不设置 statuses 过滤，保留所有生命周期状态和零余额；不会为了减少响应而只采 active validators。
+
+```bash
+# 在运行采集器的服务器重新编译，或复制相同系统/架构的新二进制：
+source /home/chen/.g/env
+go build -o bin/ethvis-collector ./cmd/ethvis-collector
+./bin/ethvis-collector version  # v0.2.0
+
+WORKERS=1 STATE_WORKERS=1 HTTP_TIMEOUT_SECONDS=3600 VALIDATOR_BATCH_SIZE=500   ./bin/ethvis-collector collect --run smoke_100
+```
+
+本版与原有 run/任务键、PG/CH schema 兼容，不需要新 plan 或重新建表。已经 complete 的任务不会重抓；失败 Validator 任务会按批次推进，并输出 `validator batch complete` 进度。数据需要整张 epoch 快照覆盖验证完成后才发布，不能看到若干批次完成就认为整个 task 已完成。
+
+成功批次缓存位于 `ARCHIVE_DIR/validator_batches/v1/...`，按网络、不可变 state root、批次起点和大小区分，引用原始归档并校验 SHA-256；重跑能重用前面已成功的批次。只有连续的注册表索引全部覆盖、并额外探测第一个不存在的索引后，才记录 `validator_coverage` 并完成任务。响应乱序允许，但重复、漏掉中间索引、返回未请求 ID、假末尾都会失败。新缓存只在新版分批成功后形成，旧的截断大响应不会被当作成功批次使用。
+
+分批减少单次序列化与传输量，并不消除 Teku 读取/重建历史 state 的成本。如果连 500 个 IDs 的小请求也持续超时，需解决服务端的状态恢复、REST 限制或资源瓶颈；不能保证靠减小批次或继续增加客户端超时就能解决。

@@ -494,7 +494,9 @@ func (s *Source) collectEpoch(ctx context.Context, m Manifest, t Task, sink *Sin
 		return e
 	}
 	switch t.Kind {
-	case "validators", "committees":
+	case "validators":
+		return s.collectValidatorsBatched(ctx, m, t, sink)
+	case "committees":
 		return s.stream(ctx, sink, "GET", base+"/"+t.Kind, nil, t.Kind, ep, nil, false)
 	case "proposer_duties":
 		return s.stream(ctx, sink, "GET", fmt.Sprintf("/eth/v1/validator/duties/proposer/%d", ep.Epoch), nil, t.Kind, ep, nil, false)

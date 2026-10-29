@@ -27,7 +27,7 @@ type VerificationReport struct {
 }
 
 func VerifyRun(ctx context.Context, c Config, m Manifest) (VerificationReport, error) {
-	report := VerificationReport{Run: m.ID, Target: m.Target, BalanceReconciliation: "not implemented in v0.1; state boundaries are labelled node_slot_state", ExecutionReceipts: "not collected in v0.1"}
+	report := VerificationReport{Run: m.ID, Target: m.Target, BalanceReconciliation: "not implemented; state boundaries are labelled node_slot_state", ExecutionReceipts: "not collected"}
 	if e := c.ValidateStores(); e != nil {
 		return report, e
 	}

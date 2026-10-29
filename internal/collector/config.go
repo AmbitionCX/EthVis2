@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Teku, PG, CH, Database, CHUser, CHPassword, ArchiveDir, RunsDir string
 	Blocks, Workers, StateWorkers, Attempts, BatchRows, BatchBytes  int
+	ValidatorBatchSize                                              int
 	Timeout                                                         time.Duration
 	SSZ                                                             bool
 }
@@ -61,13 +62,16 @@ func env(k, d string) string {
 }
 func ReadConfig() (Config, error) {
 	c := Config{Teku: env("TEKU_API", ""), PG: env("POSTGRESQL_API", ""), CH: env("CLICKHOUSE_API", ""), Database: env("CLICKHOUSE_DATABASE", "ethvis"), CHUser: env("CLICKHOUSE_USER", "default"), CHPassword: env("CLICKHOUSE_PASSWORD", ""), ArchiveDir: env("ARCHIVE_DIR", "./var/archive"), RunsDir: env("RUNS_DIR", "./var/runs")}
-	for k, p := range map[string]*int{"BLOCK_COUNT": &c.Blocks, "WORKERS": &c.Workers, "STATE_WORKERS": &c.StateWorkers, "HTTP_ATTEMPTS": &c.Attempts, "BATCH_ROWS": &c.BatchRows, "BATCH_BYTES": &c.BatchBytes} {
-		defaults := map[string]string{"BLOCK_COUNT": "100000", "WORKERS": "4", "STATE_WORKERS": "1", "HTTP_ATTEMPTS": "4", "BATCH_ROWS": "20000", "BATCH_BYTES": "16777216"}
+	for k, p := range map[string]*int{"BLOCK_COUNT": &c.Blocks, "WORKERS": &c.Workers, "STATE_WORKERS": &c.StateWorkers, "HTTP_ATTEMPTS": &c.Attempts, "BATCH_ROWS": &c.BatchRows, "BATCH_BYTES": &c.BatchBytes, "VALIDATOR_BATCH_SIZE": &c.ValidatorBatchSize} {
+		defaults := map[string]string{"BLOCK_COUNT": "100000", "WORKERS": "4", "STATE_WORKERS": "1", "HTTP_ATTEMPTS": "4", "BATCH_ROWS": "20000", "BATCH_BYTES": "16777216", "VALIDATOR_BATCH_SIZE": "500"}
 		n, e := strconv.Atoi(env(k, defaults[k]))
 		if e != nil || n < 1 {
 			return c, fmt.Errorf("%s must be positive", k)
 		}
 		*p = n
+	}
+	if c.ValidatorBatchSize > 10000 {
+		return c, errors.New("VALIDATOR_BATCH_SIZE must be <= 10000")
 	}
 	sec, e := strconv.Atoi(env("HTTP_TIMEOUT_SECONDS", "180"))
 	if e != nil || sec < 1 {

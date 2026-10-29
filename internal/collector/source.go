@@ -3,6 +3,8 @@ package collector
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,6 +79,8 @@ func (s *Source) Fetch(ctx context.Context, method, path string, body []byte, ac
 			continue
 		}
 		ref := RawRef{Endpoint: path, Method: method, Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), FetchedAt: time.Now().UTC()}
+		requestHash := sha256.Sum256(body)
+		ref.RequestSHA256 = hex.EncodeToString(requestHash[:])
 		ref.Headers = map[string]string{}
 		for _, key := range []string{"Content-Type", "Content-Encoding", "Eth-Consensus-Version", "Eth-Execution-Optimistic", "Eth-Consensus-Block-Value", "Eth-Execution-Payload-Value"} {
 			if v := resp.Header.Get(key); v != "" {

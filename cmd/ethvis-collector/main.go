@@ -27,7 +27,7 @@ func run() error {
 	}
 	cmd := os.Args[1]
 	if cmd == "version" {
-		fmt.Printf("ethvis-collector v0.1.0 %s\n", runtime.Version())
+		fmt.Printf("ethvis-collector v0.2.0 %s\n", runtime.Version())
 		return nil
 	}
 	f := flag.NewFlagSet(cmd, flag.ContinueOnError)
