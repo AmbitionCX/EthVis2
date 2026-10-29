@@ -1,0 +1,7 @@
+{
+  "name": "ethvis2-research",
+  "private": true,
+  "type": "module",
+  "engines": {"node": "24.22.1"},
+  "scripts": {"test": "node --test analysis/*.test.mjs", "verify": "node analysis/verify.mjs"}
+}

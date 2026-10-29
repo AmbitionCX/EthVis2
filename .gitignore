@@ -1,0 +1,8 @@
+.env
+.env.*
+!.env.example
+/var/
+/bin/
+/node_modules/
+*.test
+coverage.out
