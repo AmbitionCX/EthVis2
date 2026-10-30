@@ -8,7 +8,7 @@ test:
 	@test "$$(node --version)" = "v24.22.1" || (echo 'Use Node.js 24.22.1'; exit 1)
 	go test -race ./...
 	go vet ./...
-	node --test analysis/*.test.mjs
+	node --test analysis/test/*.test.mjs
 
 check-connections:
 	scripts/check_connections.sh

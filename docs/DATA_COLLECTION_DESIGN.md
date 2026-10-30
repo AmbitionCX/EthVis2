@@ -1,6 +1,6 @@
 # EthVis2：以太坊共识层与 Validator 收益分析数据采集设计
 
-文档日期：2026-10-26。本文是完整数据目标设计。已实现首版采集器，使用 Go 1.27.3 与 Node.js 24.22.1；实际操作和当前覆盖边界见 [README.md](README.md)。尚未填写真实连接或采集用户节点。
+文档日期：2026-10-26。本文是完整数据目标设计。已实现首版采集器，使用 Go 1.27.3 与 Node.js 24.22.1；实际操作和当前覆盖边界见 [README](../README.md)。v0.3 已实现区块/成员投票采集和 Node.js 独立核验；本轮未操作用户数据库或采集用户节点。
 
 ## 1. 建议与设计范围
 
@@ -958,4 +958,4 @@ CHANGELOG 已记录 Electra、Fulu 支持和 Fulu block event 修复；不能把
 
 ## 25. 采集器代码与语言设计
 
-采集器建议使用 Go，分析使用 ClickHouse SQL，Python 用于研究与交叉验证。模块布局、Go 接口、任务依赖、精确范围、归档、PG 租约、CH 幂等发布和实现顺序见 [COLLECTOR_CODE_DESIGN.md](COLLECTOR_CODE_DESIGN.md)。该文件依据本地 `../Archived/chaind` 与 `../Archived/ETH2.0-reward` 源码检查编写，目前仍为实现设计。
+采集器使用 Go 1.27.3，分析使用 ClickHouse SQL，独立核验使用 Node.js 24.22.1（`.mjs`、`node:test` 和精确整数 `BigInt`），不引入 Python 核验依赖。模块布局、Go 接口、任务依赖、精确范围、归档、PG 租约、CH 幂等发布和实现顺序见 [COLLECTOR_CODE_DESIGN.md](COLLECTOR_CODE_DESIGN.md)。该文件依据本地 `../Archived/chaind` 与 `../Archived/ETH2.0-reward` 源码检查编写，目前仍为实现设计。

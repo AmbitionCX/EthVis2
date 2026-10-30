@@ -1,208 +1,157 @@
-# EthVis2 Collector v0.2
+# EthVis2 Collector v0.3
 
-首版使用 **Go 1.27.3** 采集，用 **Node.js 24.22.1** 做研究验证。PostgreSQL 只管理任务/进度/归档索引，ClickHouse 保存事实和查询视图。完整源响应独立存为 SHA-256 寻址的 gzip 文件。
+Go **1.27.3** 采集，Node.js **24.22.1** 独立核验。默认采集完整共识层区块及 validator 的 attestation 包含明细；不请求奖励接口或全量 validator 注册表，不计算收益。ClickHouse 保存 typed facts，PostgreSQL 管理任务、依赖和 attempt，本地 gzip 保存完整原始响应。
 
-## 配置
-
-已预留未填写的 `.env`（权限 600，不纳入版本管理）。填写：
-
-```dotenv
-TEKU_API=http://127.0.0.1:5051
-POSTGRESQL_API=postgresql://user:password@127.0.0.1:5432/ethvis_control?sslmode=disable
-CLICKHOUSE_API=http://127.0.0.1:8123
-CLICKHOUSE_DATABASE=ethvis
-CLICKHOUSE_USER=default
-CLICKHOUSE_PASSWORD=
-```
-
-PostgreSQL 填已有数据库的 **DSN**，不是 HTTP 接口；ClickHouse 填 **HTTP 接口**，一般为 8123，不能填 native 9000。远程服务可使用 https。ClickHouse 也可在 URL 中写 user/password（含特殊字符需 URL encode）。程序自动加载 `.env`，不需要 `source .env`，已有环境变量优先。模板见 [.env.example](.env.example)。
-
-`.env` 不执行 shell 展开；推荐路径使用绝对路径或相对当前工作目录的路径，不能填 `~/...` 期待自动展开。
-
-## 只检查连接（不采集）
-
-```bash
-scripts/check_connections.sh
-# 或指定另一个环境文件：
-scripts/check_connections.sh /path/to/.env
-```
-
-脚本读取 `.env`，只请求 Teku 的 `node/version`，并对两个数据库执行 `SELECT 1`。不使用 Docker、不建表、不创建任务、不抓取区块，也不归档响应。每个服务最多等待 10 秒，三个检查都会执行，任一个失败时退出码为 1。不打印连接串或密码。
-
-脚本借用现有 Go 驱动，因此无需额外安装 psql；首次运行可能编译代码/下载 Go 依赖。此检查只确认连通和认证/简单查询，不证明历史数据可读或建表权限完整。
-
-### ClickHouse 返回 502 时
-
-502/503/504 表示代理、网关或上游服务异常，不能据此断言密码错误。确认 `CLICKHOUSE_API` 指向 HTTP 服务（默认 8123/HTTPS 8443），而不是 native TCP 服务（通常 9000/9440）；自定义映射以实际服务配置为准。同时检查 shell 的 HTTP(S)_PROXY / NO_PROXY 设置，以及反向代理和服务器监听/防火墙。脚本不会自动更换端口或绕过代理。
-
-## 构建与首次试跑
-
-在仓库目录执行：
-
-```bash
-source /home/chen/.g/env
-go version                         # go1.27.3
-nvm use                            # 读取 .nvmrc：24.22.1
-go build -o bin/ethvis-collector ./cmd/ethvis-collector
-./bin/ethvis-collector version
-./bin/ethvis-collector probe
-./bin/ethvis-collector init
-```
-
-`probe` 只读 Teku 并归档网络身份、pec、fork schedule、客户端和 finalized 信息。`init` 显式创建 `ethvis_*` 控制表、ClickHouse 数据库/表/视图，不修改s节点配置，也不创建 PostgreSQL 数据库。连接角色需有相应建表权限。`collect` 不自动迁移 schema。
-
-建议先用一个独立小范围检查真实节点/权限，再创建正式 10 万块任务：
-
-```bash
-./bin/ethvis-collector plan --run smoke_100 --blocks 100
-./bin/ethvis-collector collect --run smoke_100
-./bin/ethvis-collector verify --run smoke_100
-```
-
-正式范围：
-
-```bash
-./bin/ethvis-collector plan --run pilot_100k --blocks 100000
-./bin/ethvis-collector collect --run pilot_100k --subset 100
-./bin/ethvis-collector collect --run pilot_100k --subset 1000
-./bin/ethvis-collector collect --run pilot_100k
-./bin/ethvis-collector status --run pilot_100k
-./bin/ethvis-collector verify --run pilot_100k
-```
-
-- `plan` 沿 finalized parent 链选取实际产生的 N 个 blocks，固定锚点，附带空 slot 和完整 epoch/结算支持上下文。规划是网络工作，10 万 header 的回溯可能较久；每 100 个 headers 保存进度，同一命令可继续。状态根规划逐 epoch 持久化。
-- 主区间结束于 finalized checkpoint 前两个 epochs 之前，以留出结算支持；这只是保守选段，**奖励接口失败仍视为失败**，不以固定偏移证明已成功结算。
-- `--subset` 是同一 frozen manifest 的 smoke 前缀；会扩展为完整 epoch 和支持块，因此实际请求/入库数量可能大于 100/1000。它不改变原始 core 标签，不把整个任务标为完成。
-- `collect` 同一命令重跑只补未完成任务，失败退出码非零；Ctrl+C 可停止，之后恢复。相同 run 不能由两个进程同时 collect。请保持 run 文件、归档目录和 PG 控制库配套，恢复时沿用原目录。
-- `.env` 改 BLOCK_COUNT 不会改变 frozen run。要换锚点/网络/范围，请使用新的 run id。
-- `verify` 核查所有必需任务与 published 核心 block/reward/epoch/slot 覆盖，写 `var/runs/<run>.report.json`。它验证 **本版本采集范围**，不代表完整 Validator 收益账本已经重放验证。
-
-## 本版实际采集
-
-| 数据 | 实现 |
-| --- | --- |
-| 网络信息/客户端/fork 配置 | 完整原始归档，配置引用保存在 manifest |
-| SignedBeaconBlock | 完整 JSON，保留签名、未知字段和执行 payload 中的原始交易 |
-| operations | attestation、slashings、deposit、exit、BLS change、commitments、execution requests 等已知数组拆行；同步聚合/payload 保留对象 |
-| slot | 由固定 canonical 祖先链形成时间轴，链内缺口标为 skipped；不把任意 API 404 解释为缺块 |
-| 历史 Validator | 固定 state root，以 POST ids 分批查询；成功批次可恢复缓存，保留余额 0、完整 registry 对象，并检查连续覆盖与注册表末尾 |
-| committees / proposer duties / sync members | 历史上下文；sync 位置原数组不提前去重 |
-| finality checkpoints | 固定历史 state 查询 |
-| proposer reward | 按 block root；核对 proposer identity 和分项总和 |
-| sync reward | 按 block root，保存有符号 validator 级 reward |
-| attestation reward | 按 epoch，actual、ideal、inactivity/适用 inclusion_delay；分项有符号整数不转浮点 |
-| 完整 state SSZ | `.env` 的 `COLLECT_SSZ=true` 可开启逐 epoch 归档；非常大，默认关闭 |
-| 失败响应 | 非 2xx 同样归档，429/5xx/连接错误有限重试，未解决任务留作恢复 |
-
-Validator 和 reward 数组逐条解析，不用一个大 DataFrame 容纳全部验证者。ClickHouse 按 `BATCH_ROWS` / `BATCH_BYTES` 分批写入；单条超宽记录可单独成批。完整 block 的 JSON 目前按单 block 在内存解码，最多由 WORKERS 限制并行数；所有状态类任务额外受 STATE_WORKERS 限制。
-
-## ClickHouse 查询与 Node.js 验证
-
-数据库内：
-
-- `records`：物理事实版本，含 run/task/attempt、slot/epoch、block/state roots、原始 hash 和 JSON payload。
-- `published`：每个 task 的选定 attempt 与递增 generation。
-- **`facts`**：逻辑去重后只读取已发布 attempt。分析应查这里和下面的视图，不直接 sum `records`。
-- `proposer_rewards`、`attestation_rewards`、`sync_rewards`、`validator_snapshots`、`attestations`：类型化查询视图。
-
-`core` 的粒度需注意：block/reward 记录表示主样本 root；epoch 记录表示与主样本相交的完整 epoch，因此边界 epoch 包含主样本 block 时间窗外的职责。两者不能当作同一个严格起止时刻的收益总额。
-
-示例见 [analysis/overview.sql](analysis/overview.sql)。注意一个还在 collect 中的 run，其已完成任务可见但整体可能不完整；正式范围分析先运行 `verify`。失败/替代 attempt 的物理数据不进入分析视图；本版不自动删除历史 attempts 或归档。
-
-导出已发布奖励研究样本，在 Node 中流式检查：
-
-```bash
-./bin/ethvis-collector export --run pilot_100k --output var/rewards.jsonl --limit 10000
-node analysis/verify.mjs var/rewards.jsonl
-npm test
-```
-
-脚本使用 `BigInt`，不将 Wei/Gwei 送入 JS Number。输出 proposer、attestation、sync 三类分项汇总；它不是完整净收益，也不把提款本金或未采的 EL/MEV 自动加进去。默认 export 只导出有限样本（上限 100000 行），不把几十亿行一次读入内存。导出支持 JSONL，验证脚本也接受 `.jsonl.gz`。
-
-## 一致性和恢复
-
-1. 原始 body 先完整落盘并校验寻址，相关响应头和失败状态另存 request metadata。
-2. 每次执行使用独立 attempt。CH insert 不做可能重复累加的盲目重试，失败尝试保留但不发布。
-3. 对成功 insert 回读核验逻辑行数和唯一键；PG 标记 validated 后发布 CH attempt，再标记 complete。
-4. CH 使用 ReplacingMergeTree，查询视图显式 FINAL，防止未 merge 的重复物理行影响结果；published 本身也按 generation 去重。
-5. CH/PG/文件之间没有分布式事务。发布成功但 PG 完成失败时，下次新 attempt 的更高 generation 覆盖选定结果；不会将两份收益相加。
-6. 存储/发布失败停止继续抓取，失败项保留。普通单个源接口失败不会静默跳过或伪造 0。
-
-本版选择 **ClickHouse HTTP + JSONEachRow**，便于直接填写 API URL并保持少量依赖；这是代码设计中 native driver 方案的首版简化。PG 使用 pgx；共识层通过固定 root 的原始 REST 读取，参考 chaind 的结构，不引入其 PG 链上明细后端。
-
-## 本版边界
-
-- 不采 Geth receipts、trace、relay；没有完整 EL tips/MEV 收益归因。后续可加可选 GETH_API，当前无需填写。
-- 历史状态边界明确标为 `node_slot_state` / `pre_block_verified=false`。尚未实现精确 pre-block state 重放、participation flags 解码、slashing 余额账本和余额残差对账；`verify` 报告会显式列出。
-- 未做全量 attestation 成员展开及正确性/机会损失计算；完整 bits、委员会、源签名与原始数据已保存供后续派生。
-- 还未采实时 SSE/fork-choice、blob bytes/data columns。Block 内 commitments 和完整原始字段保留；archive 节点不保证能恢复旧网络观测。
-- 不做 BLS/SSZ block root 密码学重算；当前核验节点给出的 canonical parent 链与 block/header 身份一致。未知 block 字段保留，但不声称解析了所有未来 fork 的收益规则。
-- 默认开启全体 Validator/epoch 和 reward 数据采集。10 万块即使 block 表很小，validator × epoch 仍可能数十亿行。先完成 smoke 并实测容量；本版不自动配置 TTL 或删除数据。
-
-## 测试
+## 构建与配置
 
 ```bash
 source /home/chen/.g/env
 nvm use
-go test -race ./...
-go vet ./...
-npm test
+make build
+./bin/ethvis-collector version
+# ethvis-collector v0.3.0 go1.27.3 schema=3
 ```
 
-数据库集成测试在未配置 `ETHVIS_TEST_*` 测试连接时会自动跳过。连接真实服务只需使用上述 `scripts/check_connections.sh`；不要把正式数据库连接填入测试变量。
-
-详细设计：[数据清单](DATA_COLLECTION_DESIGN.md)、[代码设计](COLLECTOR_CODE_DESIGN.md)。两份设计描述的是目标架构；可执行范围以本 README 的 v0.1 列表为准。
-
-
-## 遇到 HTTP 500、损坏 JSON 或超时后恢复
-
-同一个 frozen run 可以补采：
+现有 `.env` 保留使用，模板见 [.env.example](.env.example)。Teku 填 REST URL，PostgreSQL 填已有数据库 DSN，ClickHouse 填 HTTP URL（通常 8123，9000 通常是 native TCP）。程序自行解析 `.env`，不执行 shell 展开；已有进程环境变量优先。不需要 Docker 或 Python。
 
 ```bash
-./bin/ethvis-collector status --run smoke_100
-WORKERS=1 STATE_WORKERS=1 HTTP_TIMEOUT_SECONDS=900 ./bin/ethvis-collector collect --run smoke_100
-./bin/ethvis-collector verify --run smoke_100
+scripts/check_connections.sh
 ```
 
-先确认上一次 collect 已退出。保留 PG 控制表、`var/runs/smoke_100.json`、原始归档和 CH 数据，不要重新 plan 或换 run id。`complete` 任务跳过，`error/running/validated` 恢复到 pending。失败 block 任务包含原始区块与两类 block reward，恢复时按整个任务重做，而不是只补那一次失败 HTTP；逻辑视图按 attempt 去重。
+连接检查只请求 Teku node/version 和两个数据库 SELECT 1，不建表、不采集、不归档，每个服务限时 10 秒。502/503/504 不能证明密码错误，应检查代理、服务端监听和 HTTP 端口。
 
-- HTTP 500 需要检查已归档正文，不能据状态码推断历史数据被裁剪。新版错误日志带原始 SHA-256；若正文是 `Request Timeout`，说明 HTTP 服务端或中间层报告超时。
-- HTTP 200 也可能包含被中断的 JSON，甚至在 JSON 中混入 `Request Timeout`。采集器会以有界内存验证完整 JSON，保留损坏响应作为证据，再按 `HTTP_ATTEMPTS` 重试，绝不把半份数组发布为成功数据。
-- 响应头之后的传输截断、EOF 和客户端读取超时现在也会重试。磁盘错误、上层主动取消和不可重试 HTTP 错误不会盲目重试。
-- `HTTP_TIMEOUT_SECONDS` 仅控制客户端；即使设为 900，也不能阻止服务端或反向代理更早结束响应。需要在 Teku 主机核查同时间段日志、历史 state 重建与 CPU/I/O/内存负载，以及适用版本的 REST/代理超时配置。
-- 最后一条 collector stopped 是本轮失败汇总，可能只回显第一项错误。先看 task 状态和 coverage，不能据最后一行认为其余任务都失败。
+## 清理旧测试数据后重新跑 100 块
 
-本次仅排障时，不要用 `init` 清理数据库或删除已有成功结果。恢复后以 `verify` 确认必需任务完成；它仍不代表已完成精确余额重放对账。
-
-
-## v0.2：本机仍超时时，分批 Validator 与服务端超时
-
-保留已经验证有用的 `HTTP_TIMEOUT_SECONDS=3600`。它只控制采集器，不会更改 Teku 的请求时限。
-
-已核查的 Teku 官方源码包含隐藏启动参数（单位为秒）：
-
-```text
---Xrest-api-async-timeout-seconds=1800
-```
-
-该源码中的异步 REST 默认值为 30 秒。源码版本为 `715545a182748b959540bfceee12286e058ca49d`，**没有验证你安装的 26.10.0 二进制是否包含同一参数、也没有确认你当前服务的实际超时值**。请先在服务端核实版本支持，再把参数加到现有 Teku 启动命令/服务配置，按你的部署方式重启；不要把它误加到采集器 `.env`。1800 是供测试的服务端预算示例，客户端 3600 留出余量，不保证所有历史状态都能在该时限内恢复。
-
-- [Teku 参数源码](https://github.com/Consensys/teku/blob/715545a182748b959540bfceee12286e058ca49d/teku/src/main/java/tech/pegasys/teku/cli/options/BeaconRestApiOptions.java)
-- [Teku 默认超时源码](https://github.com/Consensys/teku/blob/715545a182748b959540bfceee12286e058ca49d/data/beaconrestapi/src/main/java/tech/pegasys/teku/beaconrestapi/BeaconRestApiConfig.java)
-
-Validator 不再用一次无限制 GET 返回全体注册表。现在按显式索引 POST，每批默认 500 个；可在采集器环境中设置 `VALIDATOR_BATCH_SIZE`（1..10000）。使用的是标准 [POST validators 接口](https://github.com/ethereum/beacon-APIs/blob/master/apis/beacon/states/validators.yaml)。不设置 statuses 过滤，保留所有生命周期状态和零余额；不会为了减少响应而只采 active validators。
+v0.3 schema 与旧版不同，不迁移旧 `smoke_100`。先停止旧采集进程，在仓库根目录查看并执行项目测试清理：
 
 ```bash
-# 在运行采集器的服务器重新编译，或复制相同系统/架构的新二进制：
-source /home/chen/.g/env
-go build -o bin/ethvis-collector ./cmd/ethvis-collector
-./bin/ethvis-collector version  # v0.2.0
-
-WORKERS=1 STATE_WORKERS=1 HTTP_TIMEOUT_SECONDS=3600 VALIDATOR_BATCH_SIZE=500   ./bin/ethvis-collector collect --run smoke_100
+./bin/ethvis-collector reset
+./bin/ethvis-collector reset --execute
 ```
 
-本版与原有 run/任务键、PG/CH schema 兼容，不需要新 plan 或重新建表。已经 complete 的任务不会重抓；失败 Validator 任务会按批次推进，并输出 `validator batch complete` 进度。数据需要整张 epoch 快照覆盖验证完成后才发布，不能看到若干批次完成就认为整个 task 已完成。
+`reset` 默认只列清单，`--execute` 才实际删除。仅清理列出的 EthVis2 PG 表、配置的 CH 数据库内本项目对象，以及 ARCHIVE_DIR/RUNS_DIR；保留 `.env`，不触碰 Teku/Geth 链数据库。自动文件清理要求两个目录均位于本仓库 `var/` 下且不含符号链接；外部自定义归档目录需要单独处理。不会删除整个 PostgreSQL/ClickHouse 数据库，也不会在 collect 启动时自动清理。
 
-成功批次缓存位于 `ARCHIVE_DIR/validator_batches/v1/...`，按网络、不可变 state root、批次起点和大小区分，引用原始归档并校验 SHA-256；重跑能重用前面已成功的批次。只有连续的注册表索引全部覆盖、并额外探测第一个不存在的索引后，才记录 `validator_coverage` 并完成任务。响应乱序允许，但重复、漏掉中间索引、返回未请求 ID、假末尾都会失败。新缓存只在新版分批成功后形成，旧的截断大响应不会被当作成功批次使用。
+清理后手动初始化新表：
 
-分批减少单次序列化与传输量，并不消除 Teku 读取/重建历史 state 的成本。如果连 500 个 IDs 的小请求也持续超时，需解决服务端的状态恢复、REST 限制或资源瓶颈；不能保证靠减小批次或继续增加客户端超时就能解决。
+```bash
+./bin/ethvis-collector init
+```
+
+## 从 Plan 开始手动执行
+
+以下每一步单独执行，确认结果后再进入下一步；在仓库根目录运行，已填写 `.env` 并完成 schema v3 的 init。
+
+**1. Plan：冻结 100 个实际区块的范围。**
+
+```bash
+./bin/ethvis-collector plan --run smoke_votes_100 --blocks 100 --profile blocks_votes
+```
+
+读取 Teku 的网络、spec、finalized 信息，从 finalized anchor 沿 parent headers 回溯 100 个实际 canonical blocks。生成 RUNS_DIR 下的 `smoke_votes_100.json`（默认 `var/runs/smoke_votes_100.json`），记录固定 roots、slots 和 profile。空 slot 不计入 100。这一步会归档元数据响应，但不采集完整区块正文，不向两个数据库写入任务或区块数据；不会调用奖励/全量 validators 接口。同名同参数再次 plan 读取已冻结清单，不移动范围。
+
+**2. Collect：采集正文、入库并展开成员投票。**
+
+```bash
+WORKERS=1 STATE_WORKERS=1 HTTP_TIMEOUT_SECONDS=7200 \
+  ./bin/ethvis-collector collect --run smoke_votes_100
+```
+
+读取刚才的固定清单，将任务登记到 PG，归档完整区块，拆解写入 CH；根据实际 attestations 获取对应历史委员会，再展开 validator 成员、所投内容及包含位置。此命令内部会完成这些采集阶段，不计算收益。三个行内环境变量只覆盖本次命令，不修改 `.env`。失败后重跑同一条 collect，可复用成功任务和归档，不要重新 plan 改范围。
+
+**3. Status：查看任务进度。**
+
+```bash
+./bin/ethvis-collector status --run smoke_votes_100
+```
+
+读取 PG 任务状态，分别显示区块/投票任务完成情况以及失败、blocked 数量；不重新采集。可以在 collect 结束后查看，也可以从另一个终端观察。collect 完成后尚未 verify 时，`profile_complete` 仍可能为 false。
+
+**4. Verify：检查数据库中的覆盖和发布一致性。**
+
+```bash
+./bin/ethvis-collector verify --run smoke_votes_100
+```
+
+检查 required tasks、封存的 attempt、100 个冻结区块和 slot 覆盖、逐 aggregate 成员数量及唯一性。通过后写入本地报告并将 PG run 标记为 verified；不重新从 Teku 采集，也不计算收益。
+
+**5. Export：准备 Node.js 独立核验所需的完整数据包。**
+
+```bash
+./bin/ethvis-collector export --kind votes --run smoke_votes_100 \
+  --output var/verification/smoke_votes_100
+```
+
+先再次确认当前发布结果可核验，再导出 manifest、publication、原始区块/委员会、CH 已发布成员行和 checksum。按块完整导出，无默认行数截断，不启动新一轮采集。输出目录必须不存在；重复导出可指定新的目录名。
+
+**6. Node.js：从原始输入独立重算并比对投票映射。**
+
+```bash
+node analysis/verify-votes.mjs --input var/verification/smoke_votes_100
+```
+
+使用 Node.js 24.22.1 离线读取第 5 步导出的目录，独立解码 bits、映射成员与位置、计算 AttestationData SSZ root，并逐条比对；不连接 Teku、PG 或 CH，不计算收益。成功输出 `votes_verified: true`，失败返回非 0。
+
+本次文档调整未执行上述真实清理或采集命令。
+
+## 两个 profile 与完成语义
+
+| profile | 必需数据 | 不包含 |
+| --- | --- | --- |
+| `blocks` | 原始区块、完整字段拆解、空 slot 时间轴及覆盖 | 委员会映射、奖励、余额、Geth receipts |
+| `blocks_votes`（默认） | blocks 全部 + 历史委员会 + 每个 aggregate 的 validator 成员包含长表 | 奖励、全量 validator 注册表/余额、Geth receipts |
+
+plan 冻结 finalized anchor 及从它沿 parent 链回溯的 **N 个实际 canonical blocks**，空 slot 不计入 N，不等待额外奖励结算窗口。同 run resume 不移动范围。旧版 `--subset`、`--limit`、默认奖励 export 和未实现的 `--from-run` 不属于新 CLI。
+
+队列按 raw → decode/slots → 发现委员会需求并封口 → committees → attestation_map 执行。区块事实独立发布；委员会失败不会撤销区块，但 votes profile 不能标为完整。status 分别显示区块/投票任务完成及 verified 状态；Go verify 成功才将 profile 标为 verified，Node 独立核验报告另行输出。失败 task 可以重跑同一 collect 命令恢复，已完成 task 不重复累计。
+
+委员会按实际 attestation slot 的 epoch 获取，使用冻结 canonical 分支上某包含块的 state root（适用于该 state 的当前/前一 epoch），请求明确 `?epoch=`。无需全量 validator registry，但历史委员会仍可能触发节点状态恢复；服务端 Request Timeout 与客户端 HTTP_TIMEOUT_SECONDS 是不同预算。
+
+## 保存的数据与投票查询
+
+完整 HTTP 响应保存在 ARCHIVE_DIR，数据库保存 typed 查询字段及原始对象/归档 hash：
+
+- beacon_blocks、block_operations：签名、body 字段、slashings、deposits、exits、sync aggregate、blob commitments、execution requests 等。未知字段保留。
+- execution_payloads、execution_transactions、withdrawals：完整 payload、按原数组位置保存交易字节和提款；不代表取得 receipts/trace/blob sidecars。
+- attestation_inclusions：投票 slot、包含 slot/root/index、head/source/target、原始 bits、签名、SSZ AttestationData root、参与位数量。
+- beacon_committees：有序成员及历史 state/context、原始响应。
+- validator_attestation_inclusions：validator index、投票内容、包含位置、真实 committee index/position、aggregation position、输入 attempt 与原始证据。
+- slot_coverage、attestation_mapping_coverage：空 slots、零 attestation 区块、逐 aggregate 映射覆盖。
+
+读取 `*_published` 视图，不直接聚合物理表。视图以 `(run, task)` 选中的唯一 attempt 过滤并逻辑去重；collect 最后封存 selection，verify/export 确认其与 PG 和本地 publication 相同。查询同时限定 run/network；同一事实在不同 run 重采不会自动成为新的链上投票。
+
+查询例子见 [validator_votes.sql](analysis/sql/validator_votes.sql)、[slot_arcs.sql](analysis/sql/slot_arcs.sql) 和 [coverage.sql](analysis/sql/coverage.sql)。SQL 默认数据库名 ethvis；其他库名应按实际配置修改。
+
+SSZ bitlist 按 LSB 顺序排除终止位；Electra/Fulu 用 committee_bits 选择委员会并按 index 顺序拼接。旧 fork 使用 data.index。支持 phase0、altair、bellatrix、capella、deneb、electra、fulu；版本与冻结 spec 不符或未知 fork 会阻止解码，原始响应仍保留。
+
+同一投票被多个 aggregate/区块包含时，基础表保留每次包含。逻辑投票可后续按 network + validator + attestation_data_root 去重；不要直接按 validator + epoch 覆盖。bit=0、未采到或窗口截断都不等于证明 validator 没投票。链上包含记录不能恢复仅在 gossip 中传播的投票。
+
+## 独立核验与已知边界
+
+Go verify 检查 required tasks、封口 publication、冻结区块/slot 覆盖、逐 aggregate 成员行数及唯一性。Node 从导出包中的完整原始 block/committee 重新解码并逐条比较成员、位置和 SSZ data root，同时检查文件 hash、精确大整数、重复身份和零行覆盖。完整 votes export **没有默认行数截断**，按块导出和核验；每次内存规模受单块数据约束。
+
+不在本版计算收益、余额权重、head/source/target 正确性分类，不重放全部状态转换，不重新验证聚合 BLS 签名，也不本地重算完整 block SSZ root。区块身份基于受信任节点的 frozen canonical headers 与正文 slot/parent/state 对应检查。
+
+## 代码与测试
+
+入口为 `cmd/ethvis-collector` → `internal/app`；活动代码分为 config/domain/beacon/archive/decode/pipeline/storage。`internal/collector` 旧包暂作为参考和原测试保留，新 CLI 不依赖它。旧奖励研究脚本隔离在 `analysis/rewards/`。设计细节见 [代码设计](docs/COLLECTOR_CODE_DESIGN.md)。
+
+```bash
+make test
+# 可选：仅在专用、空的测试数据库运行真实数据库集成测试。
+# PostgreSQL 数据库名必须以 ethvis_test_ 开头；测试会清理其测试表。
+ETHVIS_TEST_PG_DSN='postgresql://…/ethvis_test_empty' \
+ETHVIS_TEST_CH_URL='http://127.0.0.1:8123' \
+  go test -run TestDatabaseBlocksVotesRoundTrip -v ./internal/pipeline
+```
+
+常规测试不读取 `.env`。真实数据库集成测试在没有显式测试连接变量时跳过；不能把本地 mock/离线核验通过当成已完成真实 Teku/数据库的 100 块验收。首轮通过后再新建 `--blocks 1000`、`--blocks 100000` 的 run。
+
+| 环境变量 | 含义 |
+| --- | --- |
+| ARCHIVE_DIR / RUNS_DIR | 原始响应/spool 与冻结清单/检查点/报告目录 |
+| BLOCK_COUNT | plan 未传 --blocks 时的默认实际块数 |
+| WORKERS / STATE_WORKERS | 普通任务并发 / 委员会并发上限 |
+| HTTP_TIMEOUT_SECONDS / HTTP_ATTEMPTS | Teku 每次请求总预算 / 尝试次数 |
+| BATCH_ROWS / BATCH_BYTES | CH 有界写入批次的行数/字节阈值；单个大行独立写入 |
+
+旧 `.env` 中的 COLLECT_SSZ、VALIDATOR_BATCH_SIZE 在 v0.3 不生效，不会因此开启全量 state/validators 请求。真实 `.env` 没有被模板覆盖。

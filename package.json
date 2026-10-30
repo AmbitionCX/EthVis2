@@ -3,5 +3,10 @@
   "private": true,
   "type": "module",
   "engines": {"node": "24.22.1"},
-  "scripts": {"test": "node --test analysis/*.test.mjs", "verify": "node analysis/verify.mjs"}
+  "scripts": {
+    "test": "node --test analysis/test/*.test.mjs",
+    "verify": "node analysis/verify-votes.mjs",
+    "verify:votes": "node analysis/verify-votes.mjs",
+    "test:rewards": "node --test analysis/rewards/*.test.mjs"
+  }
 }
